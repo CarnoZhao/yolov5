@@ -92,7 +92,7 @@ def exif_transpose(image):
 
 
 def create_dataloader(path, imgsz, batch_size, stride, single_cls=False, hyp=None, augment=False, cache=False, pad=0.0,
-                      rect=False, rank=-1, workers=8, image_weights=False, quad=False, prefix='', shuffle=False):
+                      rect=False, rank=-1, workers=8, image_weights=False, quad=False, prefix='', shuffle=False,remove_empty_gt=False, downsample=1):
     if rect and shuffle:
         LOGGER.warning('WARNING: --rect is incompatible with DataLoader shuffle, setting shuffle=False')
         shuffle = False
@@ -106,7 +106,9 @@ def create_dataloader(path, imgsz, batch_size, stride, single_cls=False, hyp=Non
                                       stride=int(stride),
                                       pad=pad,
                                       image_weights=image_weights,
-                                      prefix=prefix)
+                                      prefix=prefix,
+                                      remove_empty_gt=remove_empty_gt,
+                                      downsample=downsample)
 
     batch_size = min(batch_size, len(dataset))
     nw = min([os.cpu_count() // WORLD_SIZE, batch_size if batch_size > 1 else 0, workers])  # number of workers
@@ -378,7 +380,7 @@ class LoadImagesAndLabels(Dataset):
     cache_version = 0.6  # dataset labels *.cache version
 
     def __init__(self, path, img_size=640, batch_size=16, augment=False, hyp=None, rect=False, image_weights=False,
-                 cache_images=False, single_cls=False, stride=32, pad=0.0, prefix=''):
+                 cache_images=False, single_cls=False, stride=32, pad=0.0, prefix='', remove_empty_gt = False, downsample = 1):
         self.img_size = img_size
         self.augment = augment
         self.hyp = hyp
@@ -437,7 +439,16 @@ class LoadImagesAndLabels(Dataset):
         self.shapes = np.array(shapes, dtype=np.float64)
         self.img_files = list(cache.keys())  # update
         self.label_files = img2label_paths(cache.keys())  # update
-        n = len(shapes)  # number of images
+
+        if remove_empty_gt:
+            empty_gts = [len(_) == 0 for _ in labels]
+            self.labels = [_ for _, e in zip(self.labels, empty_gts) if not e]
+            self.segments = [_ for _, e in zip(self.segments, empty_gts) if not e]
+            self.shapes = self.shapes[~np.array(empty_gts)]
+            self.img_files = [_ for _, e in zip(self.img_files, empty_gts) if not e]
+            self.label_files = [_ for _, e in zip(self.label_files, empty_gts) if not e]
+
+        n = len(self.shapes)  # number of images
         bi = np.floor(np.arange(n) / batch_size).astype(np.int)  # batch index
         nb = bi[-1] + 1  # number of batches
         self.batch = bi  # batch index of image
@@ -504,6 +515,9 @@ class LoadImagesAndLabels(Dataset):
                 pbar.desc = f'{prefix}Caching images ({gb / 1E9:.1f}GB {cache_images})'
             pbar.close()
 
+        self.orig_len = len(self.img_files)
+        self.downsample = downsample
+
     def cache_labels(self, path=Path('./labels.cache'), prefix=''):
         # Cache dataset labels, check images and read shapes
         x = {}  # dict
@@ -541,7 +555,7 @@ class LoadImagesAndLabels(Dataset):
         return x
 
     def __len__(self):
-        return len(self.img_files)
+        return int(round(self.orig_len * self.downsample))
 
     # def __iter__(self):
     #     self.count = -1
@@ -550,6 +564,8 @@ class LoadImagesAndLabels(Dataset):
     #     return self
 
     def __getitem__(self, index):
+        if self.downsample != 1:
+            index = np.random.randint(0, self.orig_len)
         index = self.indices[index]  # linear, shuffled, or image_weights
 
         hyp = self.hyp
