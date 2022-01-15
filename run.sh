@@ -1,0 +1,13 @@
+python train.py \
+    --weights ./weights/yolov5m6.pt \
+    --data ./datasets/reef/train/yolos/fold_1.yaml \
+    --hyp ./work_configs/reef/reef_m6.yaml \
+    --epochs 20 \
+    --batch-size 6 \
+    --img-size 2560 \
+    --device 0,1,3 \
+    --workers 4 \
+    --exist-ok \
+    --remove-empty-gt \
+    --project work_dirs \
+    --name 2x_m6
