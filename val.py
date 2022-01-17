@@ -28,6 +28,7 @@ from threading import Thread
 import numpy as np
 import torch
 from tqdm import tqdm
+from pycocotools.coco import COCO
 
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # YOLOv5 root directory
@@ -56,13 +57,13 @@ def save_one_txt(predn, save_conf, shape, file):
             f.write(('%g ' * len(line)).rstrip() % line + '\n')
 
 
-def save_one_json(predn, jdict, path, class_map):
+def save_one_json(predn, jdict, path, image_id_dict, class_map):
     # Save one JSON result {"image_id": 42, "category_id": 18, "bbox": [258.15, 41.29, 348.26, 243.78], "score": 0.236}
     image_id = int(path.stem) if path.stem.isnumeric() else path.stem
     box = xyxy2xywh(predn[:, :4])  # xywh
     box[:, :2] -= box[:, 2:] / 2  # xy center to top-left corner
     for p, b in zip(predn.tolist(), box.tolist()):
-        jdict.append({'image_id': image_id,
+        jdict.append({'image_id': image_id_dict[str(path)],
                       'category_id': class_map[int(p[5])],
                       'bbox': [round(x, 3) for x in b],
                       'score': round(p[4], 5)})
@@ -120,6 +121,8 @@ def run(data,
         plots=True,
         callbacks=Callbacks(),
         compute_loss=None,
+        ann_file=None,
+        img_dir=None,
         ):
     # Initialize/load model and set device
     training = model is not None
@@ -153,6 +156,14 @@ def run(data,
         # Data
         data = check_dataset(data)  # check
 
+    ref = COCO(ann_file)
+    image_id_dict = {}
+    class_map = {}
+    for img_id in ref.imgs:
+        image_id_dict[os.path.abspath(os.path.join(img_dir, ref.imgs[img_id]["file_name"]))] = img_id
+    for i, cat_id in enumerate(ref.cats):
+        class_map[i] = cat_id
+
     # Configure
     model.eval()
     is_coco = isinstance(data.get('val'), str) and data['val'].endswith('coco/val2017.txt')  # COCO dataset
@@ -171,7 +182,7 @@ def run(data,
     seen = 0
     confusion_matrix = ConfusionMatrix(nc=nc)
     names = {k: v for k, v in enumerate(model.names if hasattr(model, 'names') else model.module.names)}
-    class_map = coco80_to_coco91_class() if is_coco else list(range(1000))
+    # class_map = coco80_to_coco91_class() if is_coco else list(range(1, 1000))
     s = ('%20s' + '%11s' * 6) % ('Class', 'Images', 'Labels', 'P', 'R', 'mAP@.5', 'mAP@.5:.95')
     dt, p, r, f1, mp, mr, map50, map = [0.0, 0.0, 0.0], 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
     loss = torch.zeros(3, device=device)
@@ -238,7 +249,7 @@ def run(data,
             if save_txt:
                 save_one_txt(predn, save_conf, shape, file=save_dir / 'labels' / (path.stem + '.txt'))
             if save_json:
-                save_one_json(predn, jdict, path, class_map)  # append to COCO-JSON dictionary
+                save_one_json(predn, jdict, path, image_id_dict, class_map)  # append to COCO-JSON dictionary
             callbacks.run('on_val_image_end', pred, predn, path, names, im[si])
 
         # Plot images
@@ -281,38 +292,38 @@ def run(data,
     # Save JSON
     if save_json and len(jdict):
         w = Path(weights[0] if isinstance(weights, list) else weights).stem if weights is not None else ''  # weights
-        anno_json = str(Path(data.get('path', '../coco')) / 'annotations/instances_val2017.json')  # annotations json
+        # anno_json = str(Path(data.get('path', '../coco')) / 'annotations/instances_val2017.json')  # annotations json
         pred_json = str(save_dir / f"{w}_predictions.json")  # predictions json
         LOGGER.info(f'\nEvaluating pycocotools mAP... saving {pred_json}...')
         with open(pred_json, 'w') as f:
             json.dump(jdict, f)
 
-        try:  # https://github.com/cocodataset/cocoapi/blob/master/PythonAPI/pycocoEvalDemo.ipynb
-            check_requirements(['pycocotools'])
-            from pycocotools.coco import COCO
-            from pycocotools.cocoeval import COCOeval
+    #     try:  # https://github.com/cocodataset/cocoapi/blob/master/PythonAPI/pycocoEvalDemo.ipynb
+    #         check_requirements(['pycocotools'])
+    #         from pycocotools.coco import COCO
+    #         from pycocotools.cocoeval import COCOeval
 
-            anno = COCO(anno_json)  # init annotations api
-            pred = anno.loadRes(pred_json)  # init predictions api
-            eval = COCOeval(anno, pred, 'bbox')
-            if is_coco:
-                eval.params.imgIds = [int(Path(x).stem) for x in dataloader.dataset.img_files]  # image IDs to evaluate
-            eval.evaluate()
-            eval.accumulate()
-            eval.summarize()
-            map, map50 = eval.stats[:2]  # update results (mAP@0.5:0.95, mAP@0.5)
-        except Exception as e:
-            LOGGER.info(f'pycocotools unable to run: {e}')
+    #         anno = COCO(anno_json)  # init annotations api
+    #         pred = anno.loadRes(pred_json)  # init predictions api
+    #         eval = COCOeval(anno, pred, 'bbox')
+    #         if is_coco:
+    #             eval.params.imgIds = [int(Path(x).stem) for x in dataloader.dataset.img_files]  # image IDs to evaluate
+    #         eval.evaluate()
+    #         eval.accumulate()
+    #         eval.summarize()
+    #         map, map50 = eval.stats[:2]  # update results (mAP@0.5:0.95, mAP@0.5)
+    #     except Exception as e:
+    #         LOGGER.info(f'pycocotools unable to run: {e}')
 
-    # Return results
-    model.float()  # for training
-    if not training:
-        s = f"\n{len(list(save_dir.glob('labels/*.txt')))} labels saved to {save_dir / 'labels'}" if save_txt else ''
-        LOGGER.info(f"Results saved to {colorstr('bold', save_dir)}{s}")
-    maps = np.zeros(nc) + map
-    for i, c in enumerate(ap_class):
-        maps[c] = ap[i]
-    return (mp, mr, map50, map, *(loss.cpu() / len(dataloader)).tolist()), maps, t
+    # # Return results
+    # model.float()  # for training
+    # if not training:
+    #     s = f"\n{len(list(save_dir.glob('labels/*.txt')))} labels saved to {save_dir / 'labels'}" if save_txt else ''
+    #     LOGGER.info(f"Results saved to {colorstr('bold', save_dir)}{s}")
+    # maps = np.zeros(nc) + map
+    # for i, c in enumerate(ap_class):
+    #     maps[c] = ap[i]
+    # return (mp, mr, map50, map, *(loss.cpu() / len(dataloader)).tolist()), maps, t
 
 
 def parse_opt():
@@ -338,6 +349,10 @@ def parse_opt():
     parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
     parser.add_argument('--half', action='store_true', help='use FP16 half-precision inference')
     parser.add_argument('--dnn', action='store_true', help='use OpenCV DNN for ONNX inference')
+
+    
+    parser.add_argument('--ann-file', type=str, help='coco format json file for reference')
+    parser.add_argument('--img-dir', type=str, help='image directory for coco format ann_file')
     opt = parser.parse_args()
     opt.data = check_yaml(opt.data)  # check YAML
     opt.save_json |= opt.data.endswith('coco.yaml')
